@@ -1,0 +1,174 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from lmfit import Model, Parameters
+from scipy.optimize import least_squares
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+from scipy import stats
+import math
+from scipy import special
+from scipy.special import erfc
+from scipy.signal import savgol_filter
+from scipy.signal import find_peaks
+
+def analyze_rtd(file_path, window_size_absorbance, poly_order_absorbance, window_size_rtd, poly_order_rtd,guess,xl,yl):
+    # Default column indices for absorbance data
+    #start_col = 100
+    #end_col = 400
+    start_col = 561
+    end_col = 775
+
+    # Load the CSV file
+
+    data = pd.read_csv(file_path)
+    #print(len(data.to_numpy()))
+
+    # Extract time from column A and absorbance data from specified columns
+    a = np.shape(data)[0]
+
+    time = data.iloc[0:int(np.floor(a))-100, 0]  # Assuming column A is the first column (time)
+    absorbance_data = data.iloc[0:int(np.floor(a))-100, start_col:end_col]  # Columns start_col to end_col represent the absorbance data
+    
+    # Check for duplicate or zero differences in time
+    time_diff = np.diff(time)
+    if np.any(time_diff == 0):
+        print("Warning: Duplicate or constant time values detected. Fixing time data.")
+        # Remove duplicate or constant time values
+        data = data.drop_duplicates(subset=data.columns[0])
+        time = data.iloc[:, 0]
+        absorbance_data = data.iloc[:, start_col:end_col]
+
+    # Calculate the average absorbance across specified columns
+    average_absorbance = absorbance_data.mean(axis=1)
+
+    print(max(average_absorbance))
+    
+
+    # Apply the generalized SG filter for smoothing the absorbance data
+    # Apply the Savitzky-Golay filter
+    window_length = 21 # The length of the filter window (must be a positive odd integer)
+    polyorder = 5 # The order of the polynomial used to fit the data
+    smoothed_rtd_curve1 = savgol_filter(average_absorbance, window_length, polyorder)
+    smoothed_rtd_curve1 = np.array(smoothed_rtd_curve1)
+    smoothed_rtd_curve = average_absorbance
+    peaks = find_peaks(smoothed_rtd_curve1, height=max(average_absorbance) * 0.01)
+    yo = find_y_offset(smoothed_rtd_curve,method='percentile')
+    demonstrate_offset_methods(smoothed_rtd_curve)
+    print(peaks)
+    time = np.array(time)
+    max_index = np.where(smoothed_rtd_curve == np.max(smoothed_rtd_curve))[0][0]
+    plt.plot(time, average_absorbance, label='Raw RTD Curve', color='blue')
+####################################################################################################################################################################################
+    def emg(x, amplitude, center, sigma, gamma, yoffset):
+        """
+        Exponentially Modified Gaussian function
+        
+        Parameters:
+        x: x-axis values
+        amplitude: peak height
+        center: peak center (retention time)
+        sigma: peak width (related to standard deviation)
+        gamma: exponential distortion (tailing factor)
+        """
+        return yoffset + (amplitude * (sigma / gamma) * np.sqrt(np.pi/2) * \
+               np.exp(1/2 * (sigma/gamma)**2 - (x-center)/gamma) * \
+               (erfc((sigma/gamma)/np.sqrt(2) - (x-center)/(sigma*np.sqrt(2)))))
+        
+    # Load your data (replace this with your actual data loading)
+    emg_model = Model(emg)
+    
+    # Create model and set up parameters with constraints
+    model = Model(emg)
+    params = Parameters()
+    params.add('amplitude', value=smoothed_rtd_curve[max_index], min=smoothed_rtd_curve[max_index]-0.001, max = 100)
+    params.add('center', value=time[max_index], min=0, max=time[max_index]+100)
+    params.add('sigma', value=0.05, min=0, max = 100)
+    params.add('gamma', value=5, min=0.000001, max = 100)
+    params.add('yoffset', value=yo, min=yo-0.0001, max = yo+0.0001)
+
+    # Perform the fit with a specified method
+    # Common methods include: 'leastsq', 'least_squares', 'differential_evolution', 'brute', 'nelder'
+    try:
+        result = emg_model.fit(smoothed_rtd_curve, params,x=time, method='leastsq')
+        print(result.params)
+        #print(result.residual)
+
+        #amplitude_fit, center_fit, sigma_fit, gamma_fit = result.params
+        mean_emg = result.params['center'] + result.params['gamma']
+        Var_emg = result.params['sigma']**2 + result.params['gamma']**2
+        SD_emg = np.sqrt(Var_emg)
+        print("mean: ", mean_emg, " Variance: ",  Var_emg, " SD: ", SD_emg)
+        control1 = 1
+    except:
+        control1 = 0
+        print("emg function did not work")
+####################################################################################################################################################################################
+    print(np.min(smoothed_rtd_curve), np.max(smoothed_rtd_curve))
+
+    # Plot the smoothed RTD curve with the Gaussian fit
+    if(control1 == 1):
+        plt.figure(figsize=(6, 4))
+        if(xl[0]+xl[1]!=0):
+            plt.xlim(xl[0],xl[1])
+        if(yl[0]+yl[1]!=0):
+            plt.ylim(yl[0],yl[1])
+        plt.plot(time, smoothed_rtd_curve, label='Raw RTD Curve', color='blue')
+        plt.plot(time,result.best_fit,label='EMG Distribution Fit',color = 'red',linestyle='--')
+    else:
+        plt.figure(figsize=(6, 4))
+        if(xl[0]+xl[1]!=0):
+            plt.xlim(xl[0],xl[1])
+        if(yl[0]+yl[1]!=0):
+            plt.ylim(yl[0],yl[1])
+        plt.plot(time, smoothed_rtd_curve, label='Raw RTD Curve', color='blue')
+    #plt.plot(time,result.best_fit,label='EMG Distribution Fit',color = 'red',linestyle='--')
+
+    #plt.plot(time, result.best_fit, color = 'magenta', label='different method', linestyle='-.')
+    #plt.plot(time, baseline, color = 'black',linestyle='--')
+    #plt.plot(time, fit_result_test['fitted_curve'], color = 'green', label='LM Fit', linestyle='-.')
+
+    plt.xlabel('Time(s)')
+    plt.ylabel('Abs')
+    
+    #plt.plot(time, rtd, label='Gaussian Fit (RTD)', color='red', linestyle='--')#
+    #plt.xlabel('Time')
+    #plt.ylabel('Normalized RTD')
+    plt.title('RTD Curve')
+    plt.legend()
+    plt.show()
+    
+    # Print the Gaussian parameters for both absorbance and RTD
+    #print(f'Gaussian parameters for RTD: Amplitude = {popt_rtd[0]}, Mean = {popt_rtd[1]}, Std Dev = {popt_rtd[2]}, Offset = {popt_rtd[3]}')
+    #print(f'StDev/RTD = {popt_rtd[2]/(popt_rtd[1])}')
+
+    #Find indices where t is between mean - 6 * st dev and mean + 8 * st dev
+    #indices = np.where(time > popt_rtd[1] + 8*popt_rtd[2])
+    #end = indices[0][0]
+    #indices = np.where(time < popt_rtd[1] - 6*popt_rtd[2])
+    
+    start = 0
+    #time = time[start:end]
+    #Subtract the vertical offset
+    #average_absorbance = average_absorbance[start:end] - popt_rtd[3]
+    #average_absorbance = average_absorbance - result.params['d'].value
+    #Normalize area under curve
+    area = np.trapz(average_absorbance,time)
+    print("Area: ", np.mean(area), "Median: ", np.percentile(area,50))
+    average_absorbance = average_absorbance/area
+    #Plot the curve
+    plt.plot(time, average_absorbance)
+    #Calculating Mean and St dev
+    mean = np.trapz(time*average_absorbance, time)
+    variance = np.trapz((time-mean)**2 * average_absorbance, time)
+    std_dev = np.sqrt(abs(variance))
+    theta = variance/mean
+    alpha = mean/theta
+    #Print mean and standard deviation
+    print("Mean: ",mean)
+    print("Std. Dev.: ", std_dev)
+    print("Std. Dev./mean: " ,std_dev/mean)
+    print("theta: " ,theta)
+    print("alpha: " ,alpha)
+    
