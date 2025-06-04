@@ -1,0 +1,127 @@
+import numpy as np
+from scipy import stats
+from scipy.signal import find_peaks
+
+def find_y_offset(y_data, x_data=None, method='percentile', **kwargs):
+    """
+    Find the y-offset (baseline) for signal data with peaks.
+    
+    Parameters:
+    -----------
+    y_data : array-like
+        The y-values of your signal
+    x_data : array-like, optional
+        The x-values (not used in most methods, but available for custom regions)
+    method : str
+        Method to use for finding offset. Options:
+        - 'percentile': Use a low percentile (default 10th)
+        - 'exclude_peaks': Exclude peaks and take mean of remaining data
+        - 'minimum': Use the minimum value
+        - 'mode': Use the most frequent value (binned)
+        - 'robust_mean': Mean after excluding outliers
+        - 'baseline_regions': Mean of specified baseline regions
+    
+    Additional kwargs:
+    ------------------
+    percentile : float (default 10)
+        Percentile to use for 'percentile' method
+    peak_height : float (default auto)
+        Minimum height for peak detection in 'exclude_peaks' method
+    peak_prominence : float (default auto)
+        Minimum prominence for peak detection
+    baseline_ranges : list of tuples
+        x-ranges to consider as baseline for 'baseline_regions' method
+    n_bins : int (default 100)
+        Number of bins for 'mode' method
+    outlier_threshold : float (default 2.0)
+        Z-score threshold for outlier removal in 'robust_mean'
+    
+    Returns:
+    --------
+    float : The estimated y-offset
+    """
+    
+    y_data = np.array(y_data)
+    
+    if method == 'percentile':
+        percentile = kwargs.get('percentile', 10)
+        return np.percentile(y_data, percentile)
+    
+    elif method == 'exclude_peaks':
+        # Automatically determine peak detection parameters if not provided
+        peak_height = kwargs.get('peak_height', np.percentile(y_data, 75))
+        peak_prominence = kwargs.get('peak_prominence', (np.max(y_data) - np.min(y_data)) * 0.1)
+        
+        # Find peaks
+        peaks, _ = find_peaks(y_data, height=peak_height, prominence=peak_prominence)
+        
+        # Create mask to exclude peak regions (peak ± some width)
+        peak_width = kwargs.get('peak_width', 5)  # points around each peak to exclude
+        mask = np.ones(len(y_data), dtype=bool)
+        
+        for peak in peaks:
+            start = max(0, peak - peak_width)
+            end = min(len(y_data), peak + peak_width + 1)
+            mask[start:end] = False
+        
+        # Return mean of non-peak regions
+        if np.any(mask):
+            return np.mean(y_data[mask])
+        else:
+            return np.min(y_data)  # fallback if all points are near peaks
+    
+    elif method == 'minimum':
+        return np.min(y_data)
+    
+    elif method == 'mode':
+        n_bins = kwargs.get('n_bins', 100)
+        hist, bin_edges = np.histogram(y_data, bins=n_bins)
+        max_bin_idx = np.argmax(hist)
+        # Return the center of the most frequent bin
+        return (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
+    
+    elif method == 'robust_mean':
+        threshold = kwargs.get('outlier_threshold', 2.0)
+        z_scores = np.abs(stats.zscore(y_data))
+        filtered_data = y_data[z_scores < threshold]
+        return np.mean(filtered_data) if len(filtered_data) > 0 else np.mean(y_data)
+    
+    elif method == 'baseline_regions':
+        if x_data is None:
+            raise ValueError("x_data required for baseline_regions method")
+        
+        baseline_ranges = kwargs.get('baseline_ranges', [])
+        if not baseline_ranges:
+            raise ValueError("baseline_ranges must be specified for this method")
+        
+        x_data = np.array(x_data)
+        baseline_points = []
+        
+        for x_start, x_end in baseline_ranges:
+            mask = (x_data >= x_start) & (x_data <= x_end)
+            baseline_points.extend(y_data[mask])
+        
+        return np.mean(baseline_points) if baseline_points else np.min(y_data)
+    
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+# Example usage function
+def demonstrate_offset_methods(y_data, x_data=None):
+    """
+    Demonstrate different offset detection methods on your data.
+    """
+    methods = ['percentile', 'exclude_peaks', 'minimum', 'mode', 'robust_mean']
+    
+    print("Y-offset detection results:")
+    print("-" * 40)
+    
+    for method in methods:
+        try:
+            offset = find_y_offset(y_data, x_data, method=method)
+            print(f"{method:15s}: {offset:.4f}")
+        except Exception as e:
+            print(f"{method:15s}: Error - {e}")
+    
+    return
