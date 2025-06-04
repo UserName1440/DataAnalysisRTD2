@@ -1,0 +1,282 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from lmfit import Model, Parameters
+from scipy.optimize import least_squares
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+from scipy import stats
+import math
+from scipy import special
+from scipy.special import erfc
+from scipy.signal import savgol_filter
+from scipy.signal import find_peaks
+
+def analyze_rtd(file_path, window_size_absorbance, poly_order_absorbance, window_size_rtd, poly_order_rtd,guess,xl,yl):
+    # Default column indices for absorbance data
+    #start_col = 100
+    #end_col = 400
+    start_col = 561
+    end_col = 775
+
+    # Load the CSV file
+    data = pd.read_csv(file_path)
+    #print(len(data.to_numpy()))
+
+    # Extract time from column A and absorbance data from specified columns
+    a = np.shape(data)[0]
+
+    time = data.iloc[0:int(np.floor(a))-100, 0]  # Assuming column A is the first column (time)
+    absorbance_data = data.iloc[0:int(np.floor(a))-100, start_col:end_col]  # Columns start_col to end_col represent the absorbance data
+    
+    # Check for duplicate or zero differences in time
+    time_diff = np.diff(time)
+    if np.any(time_diff == 0):
+        print("Warning: Duplicate or constant time values detected. Fixing time data.")
+        # Remove duplicate or constant time values
+        data = data.drop_duplicates(subset=data.columns[0])
+        time = data.iloc[:, 0]
+        absorbance_data = data.iloc[:, start_col:end_col]
+
+    # Calculate the average absorbance across specified columns
+    average_absorbance = absorbance_data.mean(axis=1)
+
+    print(max(average_absorbance))
+    
+
+    # Apply the generalized SG filter for smoothing the absorbance data
+    # Apply the Savitzky-Golay filter
+    window_length = 21 # The length of the filter window (must be a positive odd integer)
+    polyorder = 5 # The order of the polynomial used to fit the data
+    smoothed_rtd_curve1 = savgol_filter(average_absorbance, window_length, polyorder)
+    smoothed_rtd_curve1 = np.array(smoothed_rtd_curve1)
+    smoothed_rtd_curve = average_absorbance
+    peaks = find_peaks(smoothed_rtd_curve1, height=max(average_absorbance) * 0.01)
+    yo = find_y_offset(smoothed_rtd_curve,method='percentile')
+    demonstrate_offset_methods(smoothed_rtd_curve)
+    print(peaks)
+    time = np.array(time)
+    max_index = np.where(smoothed_rtd_curve == np.max(smoothed_rtd_curve))[0][0]
+    plt.plot(time, average_absorbance, label='Raw RTD Curve', color='blue')
+
+####################################################################################################################################################################################
+    # EMG Model Definition
+    def emg(x, amplitude, center, sigma, gamma, yoffset):
+        """
+        Exponentially Modified Gaussian function
+        
+        Parameters:
+        x: x-axis values
+        amplitude: peak height
+        center: peak center (retention time)
+        sigma: peak width (related to standard deviation)
+        gamma: exponential distortion (tailing factor)
+        """
+        return yoffset + (amplitude * (sigma / gamma) * np.sqrt(np.pi/2) * \
+               np.exp(1/2 * (sigma/gamma)**2 - (x-center)/gamma) * \
+               (erfc((sigma/gamma)/np.sqrt(2) - (x-center)/(sigma*np.sqrt(2)))))
+
+    # Regular Gaussian Model Definition
+    def gaussian(x, amplitude, center, sigma, yoffset):
+        """
+        Regular Gaussian function
+        
+        Parameters:
+        x: x-axis values
+        amplitude: peak height
+        center: peak center (retention time)
+        sigma: peak width (standard deviation)
+        yoffset: baseline offset
+        """
+        return yoffset + amplitude * np.exp(-0.5 * ((x - center) / sigma)**2)
+        
+    # Load your data (replace this with your actual data loading)
+    emg_model = Model(emg)
+    gaussian_model = Model(gaussian)
+    
+    # EMG Model Fitting
+    # Create model and set up parameters with constraints
+    emg_params = Parameters()
+    emg_params.add('amplitude', value=smoothed_rtd_curve[max_index], min=smoothed_rtd_curve[max_index]-0.001, max = 100)
+    emg_params.add('center', value=time[max_index], min=0, max=time[max_index]+100)
+    emg_params.add('sigma', value=0.05, min=0, max = 100)
+    emg_params.add('gamma', value=5, min=0.000001, max = 100)
+    emg_params.add('yoffset', value=yo, min=yo-0.0001, max = yo+0.0001)
+
+    # Gaussian Model Fitting
+    # Create model and set up parameters with constraints
+    gaussian_params = Parameters()
+    gaussian_params.add('amplitude', value=smoothed_rtd_curve[max_index], min=smoothed_rtd_curve[max_index]-0.001, max = 100)
+    gaussian_params.add('center', value=time[max_index], min=0, max=time[max_index]+100)
+    gaussian_params.add('sigma', value=0.05, min=0, max = 100)  # Different initial guess for sigma
+    gaussian_params.add('yoffset', value=yo, min=yo-0.0001, max = yo+0.0001)
+
+    # Perform the fits with a specified method
+    emg_success = False
+    gaussian_success = False
+    
+    # EMG Fit
+    try:
+        emg_result = emg_model.fit(smoothed_rtd_curve, emg_params, x=time, method='leastsq')
+        print("EMG Fit Results:")
+        print(emg_result.params)
+        
+        # EMG statistics
+        mean_emg = emg_result.params['center'] + emg_result.params['gamma']
+        Var_emg = emg_result.params['sigma']**2 + emg_result.params['gamma']**2
+        SD_emg = np.sqrt(Var_emg)
+        oo = emg_result.params['center']
+        print("EMG type: ", type(oo))
+        print(f"EMG - Mean: {mean_emg:.4f}, Variance: {Var_emg:.4f}, SD: {SD_emg:.4f}")
+        print(f"EMG - R-squared: {1 - emg_result.residual.var() / np.var(smoothed_rtd_curve):.4f}")
+        print(f"EMG - AIC: {emg_result.aic:.4f}")
+        print(f"EMG - BIC: {emg_result.bic:.4f}")
+        emg_success = True
+    except Exception as e:
+        print(f"EMG function did not work: {e}")
+
+    # Gaussian Fit
+    try:
+        gaussian_result = gaussian_model.fit(smoothed_rtd_curve, gaussian_params, x=time, method='leastsq')
+        print("\nGaussian Fit Results:")
+        print(gaussian_result.params)
+        
+        # Gaussian statistics
+        mean_gaussian = gaussian_result.params['center'] + 0
+        sigma_gaussian = gaussian_result.params['sigma'] + 0
+        
+        print("type: ", type(mean_gaussian),type(sigma_gaussian))
+        print(f"Gaussian - Mean: {mean_gaussian:.4f}, Sigma: {sigma_gaussian:.4f}")
+        print(f"Gaussian - R-squared: {1 - gaussian_result.residual.var() / np.var(smoothed_rtd_curve):.4f}")
+        print(f"Gaussian - AIC: {gaussian_result.aic:.4f}")
+        print(f"Gaussian - BIC: {gaussian_result.bic:.4f}")
+        gaussian_success = True
+    except Exception as e:
+        print(f"Gaussian function did not work: {e}")
+
+####################################################################################################################################################################################
+    print(np.min(smoothed_rtd_curve), np.max(smoothed_rtd_curve))
+
+    # Plot comparison of both models
+    plt.figure(figsize=(12, 8))
+    
+    # Main plot
+    plt.subplot(2, 1, 1)
+    if(xl[0]+xl[1]!=0):
+        plt.xlim(xl[0],xl[1])
+    if(yl[0]+yl[1]!=0):
+        plt.ylim(yl[0],yl[1])
+    
+    plt.plot(time, smoothed_rtd_curve, label='Raw RTD Curve', color='blue', linewidth=2)
+    
+    if emg_success:
+        print("emg_success")
+        plt.plot(time, emg_result.best_fit, label='EMG Distribution Fit', color='red', linestyle='--', linewidth=2)
+    
+    if gaussian_success:
+        print("gaussian_success")
+        plt.plot(time, gaussian_result.best_fit, label='Gaussian Distribution Fit', color='green', linestyle='-.', linewidth=2)
+
+    plt.xlabel('Time (s)')
+    plt.ylabel('Absorbance')
+    plt.title('RTD Curve - Model Comparison')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Residuals plot
+    plt.subplot(2, 1, 2)
+    if emg_success:
+        plt.plot(time, emg_result.residual, label='EMG Residuals', color='red', alpha=0.7)
+    if gaussian_success:
+        plt.plot(time, gaussian_result.residual, label='Gaussian Residuals', color='green', alpha=0.7)
+    
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Residuals')
+    plt.title('Fit Residuals Comparison')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Model comparison summary
+    print("\n" + "="*60)
+    print("MODEL COMPARISON SUMMARY")
+    print("="*60)
+    
+    if emg_success and gaussian_success:
+        print(f"{'Metric':<20} {'EMG':<15} {'Gaussian':<15}")
+        print("-" * 50)
+        print(f"{'R-squared':<20} {1 - emg_result.residual.var() / np.var(smoothed_rtd_curve):<15.4f} {1 - gaussian_result.residual.var() / np.var(smoothed_rtd_curve):<15.4f}")
+        print(f"{'AIC':<20} {emg_result.aic:<15.4f} {gaussian_result.aic:<15.4f}")
+        print(f"{'BIC':<20} {emg_result.bic:<15.4f} {gaussian_result.bic:<15.4f}")
+        print(f"{'RMSE':<20} {np.sqrt(np.mean(emg_result.residual**2)):<15.4f} {np.sqrt(np.mean(gaussian_result.residual**2)):<15.4f}")
+        
+        # Determine which model fits better
+        if emg_result.aic < gaussian_result.aic:
+            print(f"\nBased on AIC, EMG model fits better (lower AIC = {emg_result.aic:.4f})")
+        else:
+            print(f"\nBased on AIC, Gaussian model fits better (lower AIC = {gaussian_result.aic:.4f})")
+            
+        if emg_result.bic < gaussian_result.bic:
+            print(f"Based on BIC, EMG model fits better (lower BIC = {emg_result.bic:.4f})")
+        else:
+            print(f"Based on BIC, Gaussian model fits better (lower BIC = {gaussian_result.bic:.4f})")
+
+    # Normalize the RTD curve for proper analysis
+    print("\n" + "="*60)
+    print("RTD ANALYSIS")
+    print("="*60)
+    
+    # Calculate area and normalize
+    area = np.trapz(smoothed_rtd_curve - yo, time)  # Subtract baseline for proper area calculation
+    print("Area under curve (baseline corrected): ", area)
+    
+    # Normalize the curve (subtract baseline, then normalize by area)
+    smoothed_rtd_curve_normalized = (smoothed_rtd_curve - yo) / area
+    
+    # Also create normalized version for the original average_absorbance
+    area_original = np.trapz(average_absorbance - yo, time)
+    average_absorbance_normalized = (average_absorbance - yo) / area_original
+    
+    # Plot normalized curve
+    plt.figure(figsize=(8, 6))
+    plt.plot(time, average_absorbance_normalized, label='Normalized RTD', color='blue')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Normalized RTD')
+    plt.title('Normalized RTD Curve')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+    
+    # Calculate moments
+    mean = np.trapz(time * average_absorbance_normalized, time)
+    variance = np.trapz((time - mean)**2 * average_absorbance_normalized, time)
+    std_dev = np.sqrt(abs(variance))
+    
+    # Print statistics
+    print("Mean: ", mean)
+    print("Std. Dev.: ", std_dev)
+    print("Std. Dev./mean: ", std_dev/mean)
+    
+    # Return results for further analysis if needed
+    results = {
+        'time': time,
+        'raw_data': smoothed_rtd_curve,
+        'normalized_data': average_absorbance_normalized,
+        'emg_success': emg_success,
+        'gaussian_success': gaussian_success,
+        'statistics': {
+            'mean': mean,
+            'std_dev': std_dev
+        }
+    }
+    
+    if emg_success:
+        results['emg_result'] = emg_result
+    if gaussian_success:
+        results['gaussian_result'] = gaussian_result
+        
+    return results
